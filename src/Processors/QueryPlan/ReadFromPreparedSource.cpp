@@ -1,6 +1,7 @@
 #include <Processors/Formats/IInputFormat.h>
 #include <Processors/QueryPlan/ReadFromPreparedSource.h>
 #include <QueryPipeline/QueryPipelineBuilder.h>
+#include <Storages/IStorage.h>
 
 namespace DB
 {
@@ -29,7 +30,7 @@ ReadFromStorageStep::ReadFromStorageStep(
     , context(std::move(context_))
     , query_info(query_info_)
 {
-    setStepDescription(storage_name);
+    setStepDescription(storage->getName());
 
     for (const auto & processor : pipe.getProcessors())
         processor->setStorageLimits(query_info.storage_limits);

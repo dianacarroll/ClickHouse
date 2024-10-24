@@ -12,7 +12,7 @@
 #include <Core/Settings.h>
 #include <Processors/QueryPlan/ReadFromPreparedSource.h>
 #include <Interpreters/IJoin.h>
-#include <Interpreters/HashJoin/HashcJoin.h>
+#include <Interpreters/HashJoin/HashJoin.h>
 #include <Interpreters/TableJoin.h>
 
 #include <Common/logger_useful.h>

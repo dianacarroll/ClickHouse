@@ -6,16 +6,22 @@
 #include <Processors/Transforms/JoiningTransform.h>
 #include <Interpreters/IJoin.h>
 #include <Interpreters/TableJoin.h>
+#include <Interpreters/Context.h>
 #include <IO/Operators.h>
 #include <Common/JSONBuilder.h>
 #include <Common/typeid_cast.h>
 #include <Interpreters/TableJoin.h>
+#include <Interpreters/HashJoin/HashJoin.h>
+#include <Storages/StorageJoin.h>
 #include <ranges>
+#include <Core/Settings.h>
+#include <Functions/FunctionFactory.h>
+#include <Interpreters/PasteJoin.h>
 
 namespace DB
 {
 
-namespace Settings
+namespace Setting
 {
     extern const SettingsJoinAlgorithm join_algorithm;
     extern const SettingsBool join_any_take_last_row;
@@ -39,8 +45,7 @@ std::string_view toString(PredicateOperator op)
         case PredicateOperator::Greater: return ">";
         case PredicateOperator::GreaterOrEquals: return ">=";
     }
-    throw Exception(ErrorCodes::LOGICAL_ERROR, "Illegal value for PredicateOperator: {}",
-        static_cast<std::underlying_type_t<PredicateOperator>>(op));
+    throw Exception(ErrorCodes::LOGICAL_ERROR, "Illegal value for PredicateOperator: {}", static_cast<Int32>(op));
 }
 
 std::optional<ASOFJoinInequality> operatorToAsofInequality(PredicateOperator op)
@@ -155,7 +160,7 @@ void JoinStepLogical::updateOutputHeader()
 }
 
 
-JoinActionRef concatConditions(std::vector<JoinActionRef> & conditions, ActionsDAG & actions_dag)
+JoinActionRef concatConditions(std::vector<JoinActionRef> & conditions, ActionsDAG & actions_dag, const ContextPtr & query_context)
 {
     if (conditions.empty())
         return JoinActionRef(nullptr);
@@ -164,7 +169,10 @@ JoinActionRef concatConditions(std::vector<JoinActionRef> & conditions, ActionsD
         return conditions.front();
 
     auto and_function = FunctionFactory::instance().get("and", query_context);
-    ActionsDAG::NodeRawConstPtrs nodes = conditions | std::views::transform([&](const auto & r) { return r.node; }) | std::ranges::to<std::vector>();
+    ActionsDAG::NodeRawConstPtrs nodes;
+    nodes.reserve(conditions.size());
+    for (const auto & condition : conditions)
+        nodes.push_back(condition.node);
 
     const auto & result_node = actions_dag.addFunction(and_function, nodes, {});
     actions_dag.addOrReplaceInOutputs(result_node);
@@ -212,30 +220,30 @@ JoinPtr JoinStepLogical::chooseJoinAlgorithm()
     auto table_join = std::make_shared<TableJoin>(settings, query_context->getGlobalTemporaryVolume(), query_context->getTempDataOnDisk());
     table_join->setJoinInfo(join_info);
 
-    std::visit([&table_join](const auto & storage_)
+    std::visit([&table_join](auto && storage_)
     {
         if (storage_)
-            table_join->setStorage(storage_);
+            table_join->setStorageJoin(storage_);
     }, prepared_join_storage);
 
     auto & table_join_clauses = table_join->getClauses();
-    for (const auto & join_condition : join_info.expression.disjunctive_conditions)
+    for (auto & join_condition : join_info.expression.disjunctive_conditions)
     {
         auto & table_join_clause = table_join_clauses.emplace_back();
         for (size_t i = 0; i < join_condition.predicates.size(); ++i)
         {
             const auto & predicate = join_condition.predicates[i];
-            if (PredicateOperator::Equals == predicate.op)
+            if (PredicateOperator::Equal == predicate.op)
                 table_join_clause.addKey(predicate.left_node.column_name, predicate.right_node.column_name, /* null_safe_comparison = */ false);
             else if (PredicateOperator::NullSafeEqual == predicate.op)
                 table_join_clause.addKey(predicate.left_node.column_name, predicate.right_node.column_name, /* null_safe_comparison = */ true);
             else if (join_info.strictness == JoinStrictness::Asof)
-                /// pass
+                { /* pass */ }
             else
                 throw Exception(ErrorCodes::INVALID_JOIN_ON_EXPRESSION, "Invalid predicate operator in JOIN ON expression");
         }
 
-        if (auto left_pre_filter_condition = concatConditions(join_condition.left_filter_conditions, expression_actions.left_pre_join_actions))
+        if (auto left_pre_filter_condition = concatConditions(join_condition.left_filter_conditions, expression_actions.left_pre_join_actions, query_context))
         {
             if (join_info.expression.disjunctive_conditions.size() == 1 && canPushDownFromOn(join_info.kind, join_info.strictness, JoinTableSide::Left))
                 left_filters.push_back(left_pre_filter_condition);
@@ -243,7 +251,7 @@ JoinPtr JoinStepLogical::chooseJoinAlgorithm()
                 table_join_clause.analyzer_left_filter_condition_column_name = left_pre_filter_condition.column_name;
         }
 
-        if (auto right_pre_filter_condition = concatConditions(join_condition.right_filter_conditions, expression_actions.right_pre_join_actions);)
+        if (auto right_pre_filter_condition = concatConditions(join_condition.right_filter_conditions, expression_actions.right_pre_join_actions, query_context))
         {
             if (join_info.expression.disjunctive_conditions.size() == 1 && canPushDownFromOn(join_info.kind, join_info.strictness, JoinTableSide::Right))
                 right_filters.push_back(right_pre_filter_condition);
@@ -251,7 +259,7 @@ JoinPtr JoinStepLogical::chooseJoinAlgorithm()
                 table_join_clause.analyzer_right_filter_condition_column_name = right_pre_filter_condition.column_name;
         }
 
-        if (auto residual_filter_condition = concatConditions(join_condition.residual_conditions, expression_actions.post_join_actions))
+        if (auto residual_filter_condition = concatConditions(join_condition.residual_conditions, expression_actions.post_join_actions, query_context))
         {
             if (join_info.expression.disjunctive_conditions.size() == 1 && canPushDownFromOn(join_info.kind, join_info.strictness))
             {
@@ -286,7 +294,7 @@ JoinPtr JoinStepLogical::chooseJoinAlgorithm()
             if (asof_predicate_found)
                 throw Exception(ErrorCodes::INVALID_JOIN_ON_EXPRESSION, "ASOF join does not support multiple inequality predicates in JOIN ON expression");
             table_join->setAsofInequality(*asof_inequality_op);
-            join_clause.addKey(predicate.left_node.column_name, predicate.right_node.column_name, /* null_safe_comparison = */ false);
+            table_join_clauses.front().addKey(predicate.left_node.column_name, predicate.right_node.column_name, /* null_safe_comparison = */ false);
         }
         if (!asof_predicate_found)
             throw Exception(ErrorCodes::INVALID_JOIN_ON_EXPRESSION, "ASOF join requires one inequality predicate in JOIN ON expression");

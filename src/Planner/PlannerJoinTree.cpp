@@ -109,9 +109,7 @@ namespace Setting
 
 namespace ErrorCodes
 {
-    extern const int INVALID_JOIN_ON_EXPRESSION;
     extern const int LOGICAL_ERROR;
-    extern const int NOT_IMPLEMENTED;
     extern const int ACCESS_DENIED;
     extern const int PARAMETER_OUT_OF_BOUND;
     extern const int TOO_MANY_COLUMNS;
@@ -1369,13 +1367,13 @@ JoinTreeQueryPlan buildQueryPlanForJoinNode(const QueryTreeNodePtr & join_table_
         join_node,
         planner_context);
 
-    std::visit([&join_step_logical](const auto & prepared_storage)
+    std::visit([&join_step_logical](auto prepared_storage)
     {
-        if constexpr (!std::is_same_v<std::monostate, decltype(prepared_storage)>)
+        if constexpr (!std::is_same_v<std::monostate, std::decay_t<decltype(prepared_storage)>>)
         {
             if (!prepared_storage)
                 return;
-            join_step_logical->setPreparedJoinStorage(prepared_storage);
+            join_step_logical->setPreparedJoinStorage(std::move(prepared_storage));
         }
     }, tryGetStorageInTableJoin(join_node.getRightTableExpression()));
 

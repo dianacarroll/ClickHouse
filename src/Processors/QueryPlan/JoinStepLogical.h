@@ -8,6 +8,9 @@
 namespace DB
 {
 
+class StorageJoin;
+class IKeyValueEntity;
+
 /** JoinStepLogical is a logical step for JOIN operation.
   * Doesn't contain any specific join algorithm or other execution details.
   * It's place holder for join operation with it's description that can be serialized.
@@ -34,7 +37,7 @@ public:
     void describeActions(FormatSettings & settings) const override;
 
     template <typename T>
-    void setPreparedJoinStorage(T && storage) { prepared_join_storage = std::forward<T>(storage); }
+    void setPreparedJoinStorage(T storage) { prepared_join_storage.emplace<T>(std::move(storage)); }
 
     JoinPtr chooseJoinAlgorithm();
 

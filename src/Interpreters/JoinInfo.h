@@ -158,7 +158,7 @@ struct JoinInfo
 //     M(UInt64, grace_hash_join_initial_buckets) \
 //     M(UInt64, grace_hash_join_max_buckets) \
 //     \
-//     /* Full sortings merge join settings */ \
+//     /* Full sorting merge join settings */ \
 //     M(UInt64, max_rows_in_set_to_optimize_join) \
 //     \
 //     /* Hash/Parallel hash join settings */ \
